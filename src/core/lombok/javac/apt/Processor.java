@@ -53,6 +53,8 @@ import com.sun.tools.javac.processing.JavacFiler;
 import com.sun.tools.javac.processing.JavacProcessingEnvironment;
 import com.sun.tools.javac.util.Options;
 
+import lombok.permit.Permit;
+
 /**
  * This processor should not be used. It used to be THE processor. This class is only there to warn people that something went wrong, and for the
  * lombok developers to see if what the reason for those failures is. 
@@ -101,8 +103,7 @@ public class Processor extends AbstractProcessor {
 		try {
 			JavacProcessingEnvironment environment = (JavacProcessingEnvironment) procEnv;
 			Options instance = Options.instance(environment.getContext());
-			Field field = Options.class.getDeclaredField("values");
-			field.setAccessible(true);
+			Field field = Permit.getField(Options.class, "values");
 			@SuppressWarnings("unchecked") Map<String, String> values = (Map<String, String>) field.get(instance);
 			if (values.isEmpty()) {
 				message.append("Options: empty\n\n");
@@ -125,8 +126,7 @@ public class Processor extends AbstractProcessor {
 
 	private void findServices(StringBuilder message, Filer filer) {
 		try {
-			Field filerFileManagerField = JavacFiler.class.getDeclaredField("fileManager");
-			filerFileManagerField.setAccessible(true);
+			Field filerFileManagerField = Permit.getField(JavacFiler.class, "fileManager");
 			JavaFileManager jfm = (JavaFileManager) filerFileManagerField.get(filer);
 			ClassLoader processorClassLoader = jfm.hasLocation(ANNOTATION_PROCESSOR_PATH) ? jfm.getClassLoader(ANNOTATION_PROCESSOR_PATH) : jfm.getClassLoader(CLASS_PATH);
 			Enumeration<URL> resources = processorClassLoader.getResources("META-INF/services/javax.annotation.processing.Processor");
@@ -222,7 +222,7 @@ public class Processor extends AbstractProcessor {
 	 * We just return the latest version of whatever JDK we run on. Stupid? Yeah, but it's either that or warnings on all versions but 1.
 	 */
 	@Override public SourceVersion getSupportedSourceVersion() {
-		return SourceVersion.values()[SourceVersion.values().length - 1];
+		return SourceVersion.latest();
 	}
 
 	@Override public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {

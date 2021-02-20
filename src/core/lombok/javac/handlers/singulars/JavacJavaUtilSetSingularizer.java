@@ -29,7 +29,6 @@ import lombok.javac.JavacTreeMaker;
 import lombok.javac.handlers.JavacSingularsRecipes.JavacSingularizer;
 import lombok.javac.handlers.JavacSingularsRecipes.SingularData;
 
-import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCStatement;
 import com.sun.tools.javac.util.ListBuffer;
 import com.sun.tools.javac.util.Name;
@@ -40,12 +39,13 @@ public class JavacJavaUtilSetSingularizer extends JavacJavaUtilListSetSingulariz
 		return LombokImmutableList.of("java.util.Set", "java.util.SortedSet", "java.util.NavigableSet");
 	}
 	
-	@Override public void appendBuildCode(SingularData data, JavacNode builderType, JCTree source, ListBuffer<JCStatement> statements, Name targetVariableName, String builderVariable) {
-		if (useGuavaInstead(builderType)) {
-			guavaListSetSingularizer.appendBuildCode(data, builderType, source, statements, targetVariableName, builderVariable);
-			return;
-		}
-		
+	@Override protected String getEmptyMaker(String target) {
+		if (target.endsWith("SortedSet")) return "java.util.Collections.emptySortedSet";
+		if (target.endsWith("NavigableSet")) return "java.util.Collections.emptyNavigableSet";
+		return "java.util.Collections.emptySet";
+	}
+	
+	@Override public void appendBuildCode(SingularData data, JavacNode builderType, JavacNode source, ListBuffer<JCStatement> statements, Name targetVariableName, String builderVariable) {
 		JavacTreeMaker maker = builderType.getTreeMaker();
 		
 		if (data.getTargetFqn().equals("java.util.Set")) {

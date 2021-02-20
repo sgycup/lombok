@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2015 The Project Lombok Authors.
+ * Copyright (C) 2015-2020 The Project Lombok Authors.
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -110,7 +110,7 @@ public class HandleUtilityClass extends JavacAnnotationHandler<UtilityClass> {
 		if (typeNode.up().getKind() == Kind.COMPILATION_UNIT) markStatic = false;
 		if (markStatic && typeNode.up().getKind() == Kind.TYPE) {
 			JCClassDecl typeDecl = (JCClassDecl) typeNode.up().get();
-			if ((typeDecl.mods.flags & Flags.INTERFACE) != 0) markStatic = false;
+			if ((typeDecl.mods.flags & (Flags.INTERFACE | Flags.ANNOTATION)) != 0) markStatic = false;
 		}
 		
 		if (markStatic) classDecl.mods.flags |= Flags.STATIC;
@@ -146,7 +146,7 @@ public class HandleUtilityClass extends JavacAnnotationHandler<UtilityClass> {
 		Name name = typeNode.toName("<init>");
 		JCBlock block = maker.Block(0L, createThrowStatement(typeNode, maker));
 		JCMethodDecl methodDef = maker.MethodDef(mods, name, null, List.<JCTypeParameter>nil(), List.<JCVariableDecl>nil(), List.<JCExpression>nil(), block, null);
-		JCMethodDecl constructor = recursiveSetGeneratedBy(methodDef, typeNode.get(), typeNode.getContext());
+		JCMethodDecl constructor = recursiveSetGeneratedBy(methodDef, typeNode);
 		JavacHandlerUtil.injectMethod(typeNode, constructor, List.<Type>nil(), Javac.createVoidType(typeNode.getSymbolTable(), CTC_VOID));
 	}
 	

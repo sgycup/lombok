@@ -47,6 +47,7 @@ import lombok.core.configuration.ConfigurationKeysLoader;
 import lombok.core.configuration.ConfigurationResolver;
 import lombok.core.configuration.ConfigurationResolverFactory;
 import lombok.javac.CapturingDiagnosticListener.CompilerMessage;
+import lombok.transform.TestLombokFilesIdempotent;
 
 public abstract class AbstractRunTests {
 	private final File dumpActualFilesHere;
@@ -74,6 +75,7 @@ public abstract class AbstractRunTests {
 		if (expected.isIgnore()) return null;
 		if (!expected.versionWithinLimit(params.getVersion())) return null;
 		if (!expected.versionWithinLimit(version)) return null;
+		if (expected.isSkipIdempotent() && params instanceof TestLombokFilesIdempotent) return null;
 		
 		final LombokTestSource sourceDirectives_ = sourceDirectives;
 		final AssertionError directiveFailure_ = directiveFailure;
@@ -89,7 +91,7 @@ public abstract class AbstractRunTests {
 					}
 				});
 				
-				boolean changed = transformCode(messages, writer, file, sourceDirectives_.getSpecifiedEncoding(), sourceDirectives_.getFormatPreferences());
+				boolean changed = transformCode(messages, writer, file, sourceDirectives_.getSpecifiedEncoding(), sourceDirectives_.getFormatPreferences(), sourceDirectives_.minVersion());
 				boolean forceUnchanged = sourceDirectives_.forceUnchanged() || sourceDirectives_.isSkipCompareContent();
 				if (params.expectChanges() && !forceUnchanged && !changed) messages.add(new CompilerMessage(-1, -1, true, "not flagged modified"));
 				if (!params.expectChanges() && changed) messages.add(new CompilerMessage(-1, -1, true, "unexpected modification"));
@@ -99,7 +101,7 @@ public abstract class AbstractRunTests {
 		};
 	}
 	
-	protected abstract boolean transformCode(Collection<CompilerMessage> messages, StringWriter result, File file, String encoding, Map<String, String> formatPreferences) throws Throwable;
+	protected abstract boolean transformCode(Collection<CompilerMessage> messages, StringWriter result, File file, String encoding, Map<String, String> formatPreferences, int minVersion) throws Throwable;
 	
 	protected String readFile(File file) throws IOException {
 		BufferedReader reader;
@@ -188,6 +190,8 @@ public abstract class AbstractRunTests {
 				for (CompilerMessage actualMessage : actualMessages) {
 					System.out.println(actualMessage);
 				}
+				System.out.println("****  Actual File  ******");
+				System.out.println(lineNumber(actualFile));
 				System.out.println("*******************");
 			}
 			if (dumpActualFilesHere != null) {
@@ -197,7 +201,23 @@ public abstract class AbstractRunTests {
 		}
 	}
 	
-	@SuppressWarnings("null") /* eclipse bug; it falsely thinks stuffAc will always be null or some such hogwash. */
+	private CharSequence lineNumber(String content) {
+		StringBuilder out = new StringBuilder();
+		int pos = 0;
+		int ln = 1;
+		while (true) {
+			out.append(String.format("%4d ", ln));
+			int idx = content.indexOf('\n', pos);
+			if (idx == -1) {
+				return out.append(content.substring(pos));
+			}
+			out.append(content.substring(pos, idx + 1));
+			ln++;
+			pos = idx + 1;
+		}
+	}
+	
+	@SuppressWarnings("null") /* eclipse bug workaround; it falsely thinks stuffAc will always be null. */
 	private static void compareMessages(String name, LombokImmutableList<CompilerMessageMatcher> expected, LinkedHashSet<CompilerMessage> actual) {
 		Iterator<CompilerMessageMatcher> expectedIterator = expected.iterator();
 		Iterator<CompilerMessage> actualIterator = actual.iterator();
@@ -265,7 +285,7 @@ public abstract class AbstractRunTests {
 			endIdx--;
 		}
 		
-		return in.substring(0, endIdx);
+		return in.substring(0, endIdx + 1);
 	}
 	
 	private static String[] removeBlanks(String[] in) {

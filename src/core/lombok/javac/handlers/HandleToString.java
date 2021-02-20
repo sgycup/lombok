@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2018 The Project Lombok Authors.
+ * Copyright (C) 2009-2020 The Project Lombok Authors.
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -30,6 +30,8 @@ import java.util.Collection;
 import lombok.ConfigurationKeys;
 import lombok.ToString;
 import lombok.core.AnnotationValues;
+import lombok.core.configuration.CallSuperType;
+import lombok.core.configuration.CheckerFrameworkVersion;
 import lombok.core.AST.Kind;
 import lombok.core.handlers.InclusionExclusionUtils;
 import lombok.core.handlers.InclusionExclusionUtils.Included;
@@ -40,7 +42,6 @@ import lombok.javac.JavacTreeMaker;
 import org.mangosdk.spi.ProviderFor;
 
 import com.sun.tools.javac.code.Flags;
-import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCAnnotation;
 import com.sun.tools.javac.tree.JCTree.JCArrayTypeTree;
 import com.sun.tools.javac.tree.JCTree.JCBlock;
@@ -92,7 +93,7 @@ public class HandleToString extends JavacAnnotationHandler<ToString> {
 		boolean includeFieldNames = true;
 		try {
 			Boolean configuration = typeNode.getAst().readConfiguration(ConfigurationKeys.TO_STRING_INCLUDE_FIELD_NAMES);
-			includeFieldNames = configuration != null ? configuration : ((Boolean)ToString.class.getMethod("includeFieldNames").getDefaultValue()).booleanValue();
+			includeFieldNames = configuration != null ? configuration : ((Boolean) ToString.class.getMethod("includeFieldNames").getDefaultValue()).booleanValue();
 		} catch (Exception ignore) {}
 		
 		Boolean doNotUseGettersConfiguration = typeNode.getAst().readConfiguration(ConfigurationKeys.TO_STRING_DO_NOT_USE_GETTERS);
@@ -111,12 +112,6 @@ public class HandleToString extends JavacAnnotationHandler<ToString> {
 			notAClass = (flags & (Flags.INTERFACE | Flags.ANNOTATION)) != 0;
 		}
 		
-		if (callSuper == null) {
-			try {
-				callSuper = ((Boolean) ToString.class.getMethod("callSuper").getDefaultValue()).booleanValue();
-			} catch (Exception ignore) {}
-		}
-		
 		if (notAClass) {
 			source.addError("@ToString is only supported on a class or enum.");
 			return;
@@ -124,7 +119,28 @@ public class HandleToString extends JavacAnnotationHandler<ToString> {
 		
 		switch (methodExists("toString", typeNode, 0)) {
 		case NOT_EXISTS:
-			JCMethodDecl method = createToString(typeNode, members, includeFieldNames, callSuper, fieldAccess, source.get());
+			if (callSuper == null) {
+				if (isDirectDescendantOfObject(typeNode)) {
+					callSuper = false;
+				} else {
+					CallSuperType cst = typeNode.getAst().readConfiguration(ConfigurationKeys.TO_STRING_CALL_SUPER);
+					if (cst == null) cst = CallSuperType.SKIP;
+					switch (cst) {
+					default:
+					case SKIP:
+						callSuper = false;
+						break;
+					case WARN:
+						source.addWarning("Generating toString implementation but without a call to superclass, even though this class does not extend java.lang.Object. If this is intentional, add '@ToString(callSuper=false)' to your type.");
+						callSuper = false;
+						break;
+					case CALL:
+						callSuper = true;
+						break;
+					}
+				}
+			}
+			JCMethodDecl method = createToString(typeNode, members, includeFieldNames, callSuper, fieldAccess, source);
 			injectMethod(typeNode, method);
 			break;
 		case EXISTS_BY_LOMBOK:
@@ -139,34 +155,47 @@ public class HandleToString extends JavacAnnotationHandler<ToString> {
 	}
 	
 	static JCMethodDecl createToString(JavacNode typeNode, Collection<Included<JavacNode, ToString.Include>> members,
-		boolean includeNames, boolean callSuper, FieldAccess fieldAccess, JCTree source) {
+		boolean includeNames, boolean callSuper, FieldAccess fieldAccess, JavacNode source) {
 		
 		JavacTreeMaker maker = typeNode.getTreeMaker();
 		
 		JCAnnotation overrideAnnotation = maker.Annotation(genJavaLangTypeRef(typeNode, "Override"), List.<JCExpression>nil());
-		JCModifiers mods = maker.Modifiers(Flags.PUBLIC, List.of(overrideAnnotation));
+		List<JCAnnotation> annsOnMethod = List.of(overrideAnnotation);
+		if (getCheckerFrameworkVersion(typeNode).generateSideEffectFree()) annsOnMethod = annsOnMethod.prepend(maker.Annotation(genTypeRef(typeNode, CheckerFrameworkVersion.NAME__SIDE_EFFECT_FREE), List.<JCExpression>nil()));
+		JCModifiers mods = maker.Modifiers(Flags.PUBLIC, annsOnMethod);
 		JCExpression returnType = genJavaLangTypeRef(typeNode, "String");
 		
 		boolean first = true;
 		
 		String typeName = getTypeName(typeNode);
+		boolean isEnum = typeNode.isEnumType();
+		
 		String infix = ", ";
 		String suffix = ")";
 		String prefix;
 		if (callSuper) {
-			prefix = typeName + "(super=";
+			prefix = "(super=";
 		} else if (members.isEmpty()) {
-			prefix = typeName + "()";
+			prefix = isEnum ? "" : "()";
 		} else if (includeNames) {
 			Included<JavacNode, ToString.Include> firstMember = members.iterator().next();
 			String name = firstMember.getInc() == null ? "" : firstMember.getInc().name();
 			if (name.isEmpty()) name = firstMember.getNode().getName();
-			prefix = typeName + "(" + name + "=";
+			prefix = "(" + name + "=";
 		} else {
-			prefix = typeName + "(";
+			prefix = "(";
 		}
 		
-		JCExpression current = maker.Literal(prefix);
+		JCExpression current;
+		if (!isEnum) { 
+			current = maker.Literal(typeName + prefix);
+		} else {
+			current = maker.Binary(CTC_PLUS, maker.Literal(typeName + "."), maker.Apply(List.<JCExpression>nil(),
+					maker.Select(maker.Ident(typeNode.toName("this")), typeNode.toName("name")),
+					List.<JCExpression>nil()));
+			if (!prefix.isEmpty()) current = maker.Binary(CTC_PLUS, current, maker.Literal(prefix));
+		}
+		
 		
 		if (callSuper) {
 			JCMethodInvocation callToSuper = maker.Apply(List.<JCExpression>nil(),
@@ -223,8 +252,10 @@ public class HandleToString extends JavacAnnotationHandler<ToString> {
 		
 		JCBlock body = maker.Block(0, List.of(returnStatement));
 		
-		return recursiveSetGeneratedBy(maker.MethodDef(mods, typeNode.toName("toString"), returnType,
-			List.<JCTypeParameter>nil(), List.<JCVariableDecl>nil(), List.<JCExpression>nil(), body, null), source, typeNode.getContext());
+		JCMethodDecl methodDef = maker.MethodDef(mods, typeNode.toName("toString"), returnType,
+			List.<JCTypeParameter>nil(), List.<JCVariableDecl>nil(), List.<JCExpression>nil(), body, null);
+		createRelevantNonNullAnnotation(typeNode, methodDef);
+		return recursiveSetGeneratedBy(methodDef, source);
 	}
 	
 	public static String getTypeName(JavacNode typeNode) {

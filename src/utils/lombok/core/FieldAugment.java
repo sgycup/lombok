@@ -24,8 +24,11 @@ package lombok.core;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.WeakHashMap;
+
+import lombok.permit.Permit;
 
 public abstract class FieldAugment<T, F> {
 	private static Object getDefaultValue(Class<?> type) {
@@ -67,6 +70,10 @@ public abstract class FieldAugment<T, F> {
 		checkNotNull(fieldType, "fieldType");
 		checkNotNull(name, "name");
 		
+		if (type.isInterface()) {
+			return new InterfaceFieldAugment<T, F>(name, fieldType);
+		}
+		
 		@SuppressWarnings("unchecked")
 		F defaultValue = (F) getDefaultValue(fieldType);
 		FieldAugment<T, F> ret = tryCreateReflectionAugment(type, fieldType, name, defaultValue);
@@ -101,10 +108,9 @@ public abstract class FieldAugment<T, F> {
 	
 	private static Field findField(Class<?> type, Class<?> wantedType, String name) {
 		try {
-			Field f = type.getDeclaredField(name);
+			Field f = Permit.getField(type, name);
 			if (Modifier.isStatic(f.getModifiers()) || Modifier.isFinal(f.getModifiers())) return null;
 			if (!typeIsAssignmentCompatible(f.getType(), wantedType)) return null;
-			f.setAccessible(true);
 			return f;
 		} catch (Exception e) {
 			return null;
@@ -174,6 +180,54 @@ public abstract class FieldAugment<T, F> {
 	 */
 	public abstract F compareAndSet(T object, F expected, F value);
 	
+	private static final class InterfaceFieldAugment<T, F> extends FieldAugment<T, F> {
+		private final String name;
+		private final Class<? super F> fieldType;
+		
+		private Map<Class<T>, FieldAugment<T, F>> map = new HashMap<Class<T>, FieldAugment<T,F>>();
+		
+		private InterfaceFieldAugment(String name, Class<? super F> fieldType) {
+			this.name = name;
+			this.fieldType = fieldType;
+		}
+		
+		private synchronized FieldAugment<T, F> getDelegate(T object) {
+			@SuppressWarnings("unchecked")
+			Class<T> c = (Class<T>) object.getClass();
+			
+			FieldAugment<T,F> fieldAugment = map.get(c);
+			if (fieldAugment == null) {
+				fieldAugment = augment(c, fieldType, name);
+				map.put(c, fieldAugment);
+			}
+			return fieldAugment;
+		}
+		
+		@Override public F get(T object) {
+			return getDelegate(object).get(object);
+		}
+		
+		@Override public F getAndSet(T object, F value) {
+			return getDelegate(object).getAndSet(object, value);
+		}
+		
+		@Override public F clear(T object) {
+			return getDelegate(object).clear(object);
+		}
+		
+		@Override public F compareAndClear(T object, F expected) {
+			return getDelegate(object).compareAndClear(object, expected);
+		}
+		
+		@Override public F setIfAbsent(T object, F value) {
+			return getDelegate(object).setIfAbsent(object, value);
+		}
+		
+		@Override public F compareAndSet(T object, F expected, F value) {
+			return getDelegate(object).compareAndSet(object, expected, value);
+		}
+	}
+
 	private static class ReflectionFieldAugment<T, F> extends FieldAugment<T, F> {
 		private final Object lock = new Object();
 		private final Field field;

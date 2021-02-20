@@ -22,6 +22,7 @@
 package lombok.javac.handlers;
 
 import static lombok.core.handlers.HandlerUtil.handleFlagUsage;
+import static lombok.javac.handlers.HandleDelegate.HANDLE_DELEGATE_PRIORITY;
 import static lombok.javac.handlers.JavacHandlerUtil.*;
 import lombok.ConfigurationKeys;
 import lombok.val;
@@ -49,7 +50,7 @@ import com.sun.tools.javac.tree.JCTree.JCVariableDecl;
 import com.sun.tools.javac.util.List;
 
 @ProviderFor(JavacASTVisitor.class)
-@HandlerPriority(65536) // 2^16; resolution needs to work, so if the RHS expression is i.e. a call to a generated getter, we have to run after that getter has been generated.
+@HandlerPriority(HANDLE_DELEGATE_PRIORITY + 100) // run slightly after HandleDelegate; resolution needs to work, so if the RHS expression is i.e. a call to a generated getter, we have to run after that getter has been generated.
 @ResolutionResetNeeded
 public class HandleVal extends JavacASTAdapter {
 	
@@ -62,6 +63,7 @@ public class HandleVal extends JavacASTAdapter {
 		JCTree typeTree = local.vartype;
 		if (typeTree == null) return;
 		String typeTreeToString = typeTree.toString();
+		JavacNode typeNode = localNode.getNodeFor(typeTree);
 		
 		if (!(eq(typeTreeToString, "val") || eq(typeTreeToString, "var"))) return;
 		boolean isVal = typeMatches(val.class, localNode, typeTree);
@@ -110,7 +112,7 @@ public class HandleVal extends JavacASTAdapter {
 		if (isVal) local.mods.flags |= Flags.FINAL;
 		
 		if (!localNode.shouldDeleteLombokAnnotations()) {
-			JCAnnotation valAnnotation = recursiveSetGeneratedBy(localNode.getTreeMaker().Annotation(local.vartype, List.<JCExpression>nil()), typeTree, localNode.getContext());
+			JCAnnotation valAnnotation = recursiveSetGeneratedBy(localNode.getTreeMaker().Annotation(local.vartype, List.<JCExpression>nil()), typeNode);
 			local.mods.annotations = local.mods.annotations == null ? List.of(valAnnotation) : local.mods.annotations.append(valAnnotation);
 		}
 		
@@ -181,7 +183,7 @@ public class HandleVal extends JavacASTAdapter {
 			local.vartype = JavacResolution.createJavaLangObject(localNode.getAst());
 			throw e;
 		} finally {
-			recursiveSetGeneratedBy(local.vartype, typeTree, localNode.getContext());
+			recursiveSetGeneratedBy(local.vartype, typeNode);
 		}
 	}
 }

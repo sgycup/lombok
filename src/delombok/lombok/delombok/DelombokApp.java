@@ -36,6 +36,7 @@ import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
 import lombok.core.LombokApp;
+import lombok.permit.Permit;
 
 import org.mangosdk.spi.ProviderFor;
 
@@ -52,11 +53,11 @@ public class DelombokApp extends LombokApp {
 				return 1;
 			}
 			try {
-				loadDelombok(args).getMethod("main", String[].class).invoke(null, new Object[] {args.toArray(new String[0])});
+				Permit.invoke(Permit.getMethod(loadDelombok(args), "main", String[].class), null, new Object[] {args.toArray(new String[0])});
 			} catch (InvocationTargetException e1) {
 				Throwable t = e1.getCause();
-				if (t instanceof Error) throw (Error)t;
-				if (t instanceof Exception) throw (Exception)t;
+				if (t instanceof Error) throw (Error) t;
+				if (t instanceof Exception) throw (Exception) t;
 				throw e1;
 			}
 			return 0;

@@ -32,7 +32,6 @@ import lombok.javac.JavacTreeMaker;
 import lombok.javac.handlers.JavacSingularsRecipes.JavacSingularizer;
 import lombok.javac.handlers.JavacSingularsRecipes.SingularData;
 
-import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCCase;
 import com.sun.tools.javac.tree.JCTree.JCExpression;
 import com.sun.tools.javac.tree.JCTree.JCStatement;
@@ -46,12 +45,11 @@ public class JavacJavaUtilListSingularizer extends JavacJavaUtilListSetSingulari
 		return LombokImmutableList.of("java.util.List", "java.util.Collection", "java.lang.Iterable");
 	}
 	
-	@Override public void appendBuildCode(SingularData data, JavacNode builderType, JCTree source, ListBuffer<JCStatement> statements, Name targetVariableName, String builderVariable) {
-		if (useGuavaInstead(builderType)) {
-			guavaListSetSingularizer.appendBuildCode(data, builderType, source, statements, targetVariableName, builderVariable);
-			return;
-		}
-		
+	@Override protected String getEmptyMaker(String target) {
+		return "java.util.Collections.emptyList";
+	}
+	
+	@Override public void appendBuildCode(SingularData data, JavacNode builderType, JavacNode source, ListBuffer<JCStatement> statements, Name targetVariableName, String builderVariable) {
 		JavacTreeMaker maker = builderType.getTreeMaker();
 		List<JCExpression> jceBlank = List.nil();
 		ListBuffer<JCCase> cases = new ListBuffer<JCCase>();
@@ -90,12 +88,12 @@ public class JavacJavaUtilListSingularizer extends JavacJavaUtilListSetSingulari
 		JCStatement switchStat = maker.Switch(getSize(maker,  builderType, data.getPluralName(), true, false, builderVariable), cases.toList());
 		JCExpression localShadowerType = chainDotsString(builderType, data.getTargetFqn());
 		localShadowerType = addTypeArgs(1, false, builderType, localShadowerType, data.getTypeArgs(), source);
-		JCStatement varDefStat = maker.VarDef(maker.Modifiers(0), data.getPluralName(), localShadowerType, null);
+		JCStatement varDefStat = maker.VarDef(maker.Modifiers(0L), data.getPluralName(), localShadowerType, null);
 		statements.append(varDefStat);
 		statements.append(switchStat);
 	}
 	
-	private List<JCStatement> createListCopy(JavacTreeMaker maker, SingularData data, JavacNode builderType, JCTree source, String builderVariable) {
+	private List<JCStatement> createListCopy(JavacTreeMaker maker, SingularData data, JavacNode builderType, JavacNode source, String builderVariable) {
 		List<JCExpression> jceBlank = List.nil();
 		Name thisName = builderType.toName(builderVariable);
 		

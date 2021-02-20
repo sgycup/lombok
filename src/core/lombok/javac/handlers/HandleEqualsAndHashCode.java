@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2009-2018 The Project Lombok Authors.
+ * Copyright (C) 2009-2020 The Project Lombok Authors.
  * 
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -25,6 +25,7 @@ import static lombok.core.handlers.HandlerUtil.handleFlagUsage;
 import static lombok.javac.Javac.*;
 import static lombok.javac.handlers.JavacHandlerUtil.*;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -33,7 +34,6 @@ import org.mangosdk.spi.ProviderFor;
 
 import com.sun.tools.javac.code.BoundKind;
 import com.sun.tools.javac.code.Flags;
-import com.sun.tools.javac.tree.JCTree;
 import com.sun.tools.javac.tree.JCTree.JCAnnotation;
 import com.sun.tools.javac.tree.JCTree.JCArrayTypeTree;
 import com.sun.tools.javac.tree.JCTree.JCBinary;
@@ -41,6 +41,8 @@ import com.sun.tools.javac.tree.JCTree.JCBlock;
 import com.sun.tools.javac.tree.JCTree.JCClassDecl;
 import com.sun.tools.javac.tree.JCTree.JCExpression;
 import com.sun.tools.javac.tree.JCTree.JCExpressionStatement;
+import com.sun.tools.javac.tree.JCTree.JCFieldAccess;
+import com.sun.tools.javac.tree.JCTree.JCIdent;
 import com.sun.tools.javac.tree.JCTree.JCMethodDecl;
 import com.sun.tools.javac.tree.JCTree.JCMethodInvocation;
 import com.sun.tools.javac.tree.JCTree.JCModifiers;
@@ -55,9 +57,11 @@ import com.sun.tools.javac.util.Name;
 
 import lombok.ConfigurationKeys;
 import lombok.EqualsAndHashCode;
+import lombok.EqualsAndHashCode.CacheStrategy;
 import lombok.core.AST.Kind;
 import lombok.core.AnnotationValues;
 import lombok.core.configuration.CallSuperType;
+import lombok.core.configuration.CheckerFrameworkVersion;
 import lombok.core.handlers.HandlerUtil;
 import lombok.core.handlers.HandlerUtil.FieldAccess;
 import lombok.core.handlers.InclusionExclusionUtils;
@@ -74,11 +78,13 @@ import lombok.javac.handlers.JavacHandlerUtil.MemberExistsResult;
 public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHashCode> {
 	private static final String RESULT_NAME = "result";
 	private static final String PRIME_NAME = "PRIME";
+	private static final String HASH_CODE_CACHE_NAME = "$hashCodeCache";
 	
 	@Override public void handle(AnnotationValues<EqualsAndHashCode> annotation, JCAnnotation ast, JavacNode annotationNode) {
 		handleFlagUsage(annotationNode, ConfigurationKeys.EQUALS_AND_HASH_CODE_FLAG_USAGE, "@EqualsAndHashCode");
 		
 		deleteAnnotationIfNeccessary(annotationNode, EqualsAndHashCode.class);
+		deleteImportFromCompilationUnit(annotationNode, CacheStrategy.class.getName());
 		EqualsAndHashCode ann = annotation.getInstance();
 		java.util.List<Included<JavacNode, EqualsAndHashCode.Include>> members = InclusionExclusionUtils.handleEqualsAndHashCodeMarking(annotationNode.up(), annotation, annotationNode);
 		JavacNode typeNode = annotationNode.up();
@@ -90,8 +96,10 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 		Boolean doNotUseGettersConfiguration = annotationNode.getAst().readConfiguration(ConfigurationKeys.EQUALS_AND_HASH_CODE_DO_NOT_USE_GETTERS);
 		boolean doNotUseGetters = annotation.isExplicit("doNotUseGetters") || doNotUseGettersConfiguration == null ? ann.doNotUseGetters() : doNotUseGettersConfiguration;
 		FieldAccess fieldAccess = doNotUseGetters ? FieldAccess.PREFER_FIELD : FieldAccess.GETTER;
-		
-		generateMethods(typeNode, annotationNode, members, callSuper, true, fieldAccess, onParam);
+
+		boolean cacheHashCode = ann.cacheStrategy() == CacheStrategy.LAZY;
+
+		generateMethods(typeNode, annotationNode, members, callSuper, true, cacheHashCode, fieldAccess, onParam);
 	}
 	
 	public void generateEqualsAndHashCodeForType(JavacNode typeNode, JavacNode source) {
@@ -105,11 +113,11 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 		
 		java.util.List<Included<JavacNode, EqualsAndHashCode.Include>> members = InclusionExclusionUtils.handleEqualsAndHashCodeMarking(typeNode, null, null);
 		
-		generateMethods(typeNode, source, members, null, false, access, List.<JCAnnotation>nil());
+		generateMethods(typeNode, source, members, null, false, false, access, List.<JCAnnotation>nil());
 	}
 	
 	public void generateMethods(JavacNode typeNode, JavacNode source, java.util.List<Included<JavacNode, EqualsAndHashCode.Include>> members,
-		Boolean callSuper, boolean whineIfExists, FieldAccess fieldAccess, List<JCAnnotation> onParam) {
+		Boolean callSuper, boolean whineIfExists, boolean cacheHashCode, FieldAccess fieldAccess, List<JCAnnotation> onParam) {
 		
 		boolean notAClass = true;
 		if (typeNode.get() instanceof JCClassDecl) {
@@ -132,30 +140,6 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 		}
 		
 		boolean isDirectDescendantOfObject = isDirectDescendantOfObject(typeNode);
-		
-		if (isDirectDescendantOfObject && callSuper) {
-			source.addError("Generating equals/hashCode with a supercall to java.lang.Object is pointless.");
-			return;
-		}
-		
-		if (implicitCallSuper && !isDirectDescendantOfObject) {
-			CallSuperType cst = typeNode.getAst().readConfiguration(ConfigurationKeys.EQUALS_AND_HASH_CODE_CALL_SUPER);
-			if (cst == null) cst = CallSuperType.WARN;
-			
-			switch (cst) {
-			default:
-			case WARN:
-				source.addWarning("Generating equals/hashCode implementation but without a call to superclass, even though this class does not extend java.lang.Object. If this is intentional, add '@EqualsAndHashCode(callSuper=false)' to your type.");
-				callSuper = false;
-				break;
-			case SKIP:
-				callSuper = false;
-				break;
-			case CALL:
-				callSuper = true;
-				break;
-			}
-		}
 		
 		boolean isFinal = (((JCClassDecl) typeNode.get()).mods.flags & Flags.FINAL) != 0;
 		boolean needsCanEqual = !isFinal || !isDirectDescendantOfObject;
@@ -185,24 +169,73 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 			//fallthrough
 		}
 		
-		JCMethodDecl equalsMethod = createEquals(typeNode, members, callSuper, fieldAccess, needsCanEqual, source.get(), onParam);
+		if (isDirectDescendantOfObject && callSuper) {
+			source.addError("Generating equals/hashCode with a supercall to java.lang.Object is pointless.");
+			return;
+		}
+		
+		if (implicitCallSuper && !isDirectDescendantOfObject) {
+			CallSuperType cst = typeNode.getAst().readConfiguration(ConfigurationKeys.EQUALS_AND_HASH_CODE_CALL_SUPER);
+			if (cst == null) cst = CallSuperType.WARN;
+			
+			switch (cst) {
+			default:
+			case WARN:
+				source.addWarning("Generating equals/hashCode implementation but without a call to superclass, even though this class does not extend java.lang.Object. If this is intentional, add '@EqualsAndHashCode(callSuper=false)' to your type.");
+				callSuper = false;
+				break;
+			case SKIP:
+				callSuper = false;
+				break;
+			case CALL:
+				callSuper = true;
+				break;
+			}
+		}
+		
+		JCMethodDecl equalsMethod = createEquals(typeNode, members, callSuper, fieldAccess, needsCanEqual, source, onParam);
 		
 		injectMethod(typeNode, equalsMethod);
 		
 		if (needsCanEqual && canEqualExists == MemberExistsResult.NOT_EXISTS) {
-			JCMethodDecl canEqualMethod = createCanEqual(typeNode, source.get(), onParam);
+			JCMethodDecl canEqualMethod = createCanEqual(typeNode, source, onParam);
 			injectMethod(typeNode, canEqualMethod);
 		}
 		
-		JCMethodDecl hashCodeMethod = createHashCode(typeNode, members, callSuper, fieldAccess, source.get());
+		if (cacheHashCode){
+			if (fieldExists(HASH_CODE_CACHE_NAME, typeNode) != MemberExistsResult.NOT_EXISTS) {
+				String msg = String.format("Not caching the result of hashCode: A field named %s already exists.", HASH_CODE_CACHE_NAME);
+				source.addWarning(msg);
+				cacheHashCode = false;
+			} else {
+				createHashCodeCacheField(typeNode, source);
+			}
+		}
+		
+		JCMethodDecl hashCodeMethod = createHashCode(typeNode, members, callSuper, cacheHashCode, fieldAccess, source);
 		injectMethod(typeNode, hashCodeMethod);
 	}
+
+	private void createHashCodeCacheField(JavacNode typeNode, JavacNode source) {
+		JavacTreeMaker maker = typeNode.getTreeMaker();
+		JCModifiers mods = maker.Modifiers(Flags.PRIVATE | Flags.TRANSIENT);
+		JCVariableDecl hashCodeCacheField = maker.VarDef(mods, typeNode.toName(HASH_CODE_CACHE_NAME), maker.TypeIdent(CTC_INT), null);
+		injectFieldAndMarkGenerated(typeNode, hashCodeCacheField);
+		recursiveSetGeneratedBy(hashCodeCacheField, source);
+	}
 	
-	public JCMethodDecl createHashCode(JavacNode typeNode, java.util.List<Included<JavacNode, EqualsAndHashCode.Include>> members, boolean callSuper, FieldAccess fieldAccess, JCTree source) {
+	public JCMethodDecl createHashCode(JavacNode typeNode, java.util.List<Included<JavacNode, EqualsAndHashCode.Include>> members, boolean callSuper, boolean cacheHashCode, FieldAccess fieldAccess, JavacNode source) {
 		JavacTreeMaker maker = typeNode.getTreeMaker();
 		
 		JCAnnotation overrideAnnotation = maker.Annotation(genJavaLangTypeRef(typeNode, "Override"), List.<JCExpression>nil());
-		JCModifiers mods = maker.Modifiers(Flags.PUBLIC, List.of(overrideAnnotation));
+		List<JCAnnotation> annsOnMethod = List.of(overrideAnnotation);
+		CheckerFrameworkVersion checkerFramework = getCheckerFrameworkVersion(typeNode);
+		if (cacheHashCode && checkerFramework.generatePure()) {
+			annsOnMethod = annsOnMethod.prepend(maker.Annotation(genTypeRef(typeNode, CheckerFrameworkVersion.NAME__PURE), List.<JCExpression>nil()));
+		} else if (checkerFramework.generateSideEffectFree()) { 
+			annsOnMethod = annsOnMethod.prepend(maker.Annotation(genTypeRef(typeNode, CheckerFrameworkVersion.NAME__SIDE_EFFECT_FREE), List.<JCExpression>nil()));
+		}
+		JCModifiers mods = maker.Modifiers(Flags.PUBLIC, annsOnMethod);
 		JCExpression returnType = maker.TypeIdent(CTC_INT);
 		ListBuffer<JCStatement> statements = new ListBuffer<JCStatement>();
 		
@@ -210,8 +243,19 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 		Name resultName = typeNode.toName(RESULT_NAME);
 		long finalFlag = JavacHandlerUtil.addFinalIfNeeded(0L, typeNode.getContext());
 		
+		boolean isEmpty = members.isEmpty();
+		
+		/* if (this.$hashCodeCache != 0) return this.$hashCodeCache; */ {
+			if (cacheHashCode) {
+				JCIdent receiver = maker.Ident(typeNode.toName("this"));
+				JCFieldAccess cacheHashCodeFieldAccess = maker.Select(receiver, typeNode.toName(HASH_CODE_CACHE_NAME));
+				JCExpression cacheNotZero = maker.Binary(CTC_NOT_EQUAL, cacheHashCodeFieldAccess, maker.Literal(CTC_INT, 0));
+				statements.append(maker.If(cacheNotZero, maker.Return(cacheHashCodeFieldAccess), null));
+			}
+		}
+		
 		/* final int PRIME = X; */ {
-			if (!members.isEmpty()) {
+			if (!isEmpty) {
 				statements.append(maker.VarDef(maker.Modifiers(finalFlag), primeName, maker.TypeIdent(CTC_INT), maker.Literal(HandlerUtil.primeForHashcode())));
 			}
 		}
@@ -227,12 +271,12 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 				/* ... 1; */
 				init = maker.Literal(1);
 			}
-			statements.append(maker.VarDef(maker.Modifiers(0), resultName, maker.TypeIdent(CTC_INT), init));
+			statements.append(maker.VarDef(maker.Modifiers(isEmpty && !cacheHashCode ? finalFlag : 0L), resultName, maker.TypeIdent(CTC_INT), init));
 		}
 		
 		for (Included<JavacNode, EqualsAndHashCode.Include> member : members) {
 			JavacNode memberNode = member.getNode();
-			JCExpression fType = getFieldType(memberNode, fieldAccess);
+			JCExpression fType = unnotate(getFieldType(memberNode, fieldAccess));
 			boolean isMethod = memberNode.getKind() == Kind.METHOD;
 			
 			JCExpression fieldAccessor = isMethod ? createMethodAccessor(maker, memberNode) : createFieldAccessor(maker, memberNode, fieldAccess);
@@ -277,9 +321,10 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 					break;
 				}
 			} else if (fType instanceof JCArrayTypeTree) {
+				JCArrayTypeTree array = (JCArrayTypeTree) fType;
 				/* java.util.Arrays.deepHashCode(this.fieldName) //use just hashCode() for primitive arrays. */
-				boolean multiDim = ((JCArrayTypeTree) fType).elemtype instanceof JCArrayTypeTree;
-				boolean primitiveArray = ((JCArrayTypeTree) fType).elemtype instanceof JCPrimitiveTypeTree;
+				boolean multiDim = unnotate(array.elemtype) instanceof JCArrayTypeTree;
+				boolean primitiveArray = unnotate(array.elemtype) instanceof JCPrimitiveTypeTree;
 				boolean useDeepHC = multiDim || !primitiveArray;
 				
 				JCExpression hcMethod = chainDots(typeNode, "java", "util", "Arrays", useDeepHC ? "deepHashCode" : "hashCode");
@@ -298,13 +343,27 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 			}
 		}
 		
+		/* 
+		 * if (result == 0) result = Integer.MIN_VALUE;
+		 * this.$hashCodeCache = result;
+		 * 
+		 */ {
+			if (cacheHashCode) {
+				statements.append(maker.If(maker.Binary(CTC_EQUAL, maker.Ident(resultName), maker.Literal(CTC_INT, 0)), 
+					maker.Exec(maker.Assign(maker.Ident(resultName), genJavaLangTypeRef(typeNode, "Integer", "MIN_VALUE"))), null));
+				
+				JCFieldAccess cacheHashCodeFieldAccess = maker.Select(maker.Ident(typeNode.toName("this")), typeNode.toName(HASH_CODE_CACHE_NAME));
+				statements.append(maker.Exec(maker.Assign(cacheHashCodeFieldAccess, maker.Ident(resultName))));
+			}
+		}
+		
 		/* return result; */ {
 			statements.append(maker.Return(maker.Ident(resultName)));
 		}
 		
 		JCBlock body = maker.Block(0, statements.toList());
 		return recursiveSetGeneratedBy(maker.MethodDef(mods, typeNode.toName("hashCode"), returnType,
-			List.<JCTypeParameter>nil(), List.<JCVariableDecl>nil(), List.<JCExpression>nil(), body, null), source, typeNode.getContext());
+			List.<JCTypeParameter>nil(), List.<JCVariableDecl>nil(), List.<JCExpression>nil(), body, null), source);
 	}
 
 	public JCExpressionStatement createResultCalculation(JavacNode typeNode, JCExpression expr) {
@@ -366,22 +425,39 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 		return maker.TypeApply(expr, wildcards.toList());
 	}
 	
-	public JCMethodDecl createEquals(JavacNode typeNode, java.util.List<Included<JavacNode, EqualsAndHashCode.Include>> members, boolean callSuper, FieldAccess fieldAccess, boolean needsCanEqual, JCTree source, List<JCAnnotation> onParam) {
+	public JCMethodDecl createEquals(JavacNode typeNode, java.util.List<Included<JavacNode, EqualsAndHashCode.Include>> members, boolean callSuper, FieldAccess fieldAccess, boolean needsCanEqual, JavacNode source, List<JCAnnotation> onParam) {
 		JavacTreeMaker maker = typeNode.getTreeMaker();
 		
 		Name oName = typeNode.toName("o");
 		Name otherName = typeNode.toName("other");
 		Name thisName = typeNode.toName("this");
 		
+		List<JCAnnotation> annsOnParamOnMethod = List.nil();
+		
 		JCAnnotation overrideAnnotation = maker.Annotation(genJavaLangTypeRef(typeNode, "Override"), List.<JCExpression>nil());
-		JCModifiers mods = maker.Modifiers(Flags.PUBLIC, List.of(overrideAnnotation));
-		JCExpression objectType = genJavaLangTypeRef(typeNode, "Object");
+		List<JCAnnotation> annsOnMethod = List.of(overrideAnnotation);
+		CheckerFrameworkVersion checkerFramework = getCheckerFrameworkVersion(typeNode);
+		if (checkerFramework.generateSideEffectFree()) {
+			annsOnMethod = annsOnMethod.prepend(maker.Annotation(genTypeRef(typeNode, CheckerFrameworkVersion.NAME__SIDE_EFFECT_FREE), List.<JCExpression>nil()));
+		}
+		JCModifiers mods = maker.Modifiers(Flags.PUBLIC, annsOnMethod);
+		JCExpression objectType;
+		if (annsOnParamOnMethod.isEmpty()) {
+			objectType = genJavaLangTypeRef(typeNode, "Object");
+		} else {
+			objectType = chainDots(typeNode, "java", "lang", "Object");
+			objectType = maker.AnnotatedType(annsOnParamOnMethod, objectType);
+		}
+		
 		JCExpression returnType = maker.TypeIdent(CTC_BOOLEAN);
 		
 		long finalFlag = JavacHandlerUtil.addFinalIfNeeded(0L, typeNode.getContext());
 		
 		ListBuffer<JCStatement> statements = new ListBuffer<JCStatement>();
-		final List<JCVariableDecl> params = List.of(maker.VarDef(maker.Modifiers(finalFlag | Flags.PARAMETER, onParam), oName, objectType, null));
+		JCVariableDecl param = maker.VarDef(maker.Modifiers(finalFlag | Flags.PARAMETER, onParam), oName, objectType, null);
+		JavacHandlerUtil.createRelevantNullableAnnotation(typeNode, param);
+		
+		final List<JCVariableDecl> params = List.of(param);
 		
 		/* if (o == this) return true; */ {
 			statements.append(maker.If(maker.Binary(CTC_EQUAL, maker.Ident(oName),
@@ -428,7 +504,7 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 			JavacNode memberNode = member.getNode();
 			boolean isMethod = memberNode.getKind() == Kind.METHOD;
 			
-			JCExpression fType = getFieldType(memberNode, fieldAccess);
+			JCExpression fType = unnotate(getFieldType(memberNode, fieldAccess));
 			JCExpression thisFieldAccessor = isMethod ? createMethodAccessor(maker, memberNode) : createFieldAccessor(maker, memberNode, fieldAccess);
 			JCExpression otherFieldAccessor = isMethod ? createMethodAccessor(maker, memberNode, maker.Ident(otherName)) : createFieldAccessor(maker, memberNode, fieldAccess, maker.Ident(otherName));
 			if (fType instanceof JCPrimitiveTypeTree) {
@@ -448,9 +524,10 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 					break;
 				}
 			} else if (fType instanceof JCArrayTypeTree) {
+				JCArrayTypeTree array = (JCArrayTypeTree) fType;
 				/* if (!java.util.Arrays.deepEquals(this.fieldName, other.fieldName)) return false; //use equals for primitive arrays. */
-				boolean multiDim = ((JCArrayTypeTree) fType).elemtype instanceof JCArrayTypeTree;
-				boolean primitiveArray = ((JCArrayTypeTree) fType).elemtype instanceof JCPrimitiveTypeTree;
+				boolean multiDim = unnotate(array.elemtype) instanceof JCArrayTypeTree;
+				boolean primitiveArray = unnotate(array.elemtype) instanceof JCPrimitiveTypeTree;
 				boolean useDeepEquals = multiDim || !primitiveArray;
 				
 				JCExpression eqMethod = chainDots(typeNode, "java", "util", "Arrays", useDeepEquals ? "deepEquals" : "equals");
@@ -482,28 +559,35 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 		}
 		
 		JCBlock body = maker.Block(0, statements.toList());
-		return recursiveSetGeneratedBy(maker.MethodDef(mods, typeNode.toName("equals"), returnType, List.<JCTypeParameter>nil(), params, List.<JCExpression>nil(), body, null), source, typeNode.getContext());
+		return recursiveSetGeneratedBy(maker.MethodDef(mods, typeNode.toName("equals"), returnType, List.<JCTypeParameter>nil(), params, List.<JCExpression>nil(), body, null), source);
 	}
 
-	public JCMethodDecl createCanEqual(JavacNode typeNode, JCTree source, List<JCAnnotation> onParam) {
+	public JCMethodDecl createCanEqual(JavacNode typeNode, JavacNode source, List<JCAnnotation> onParam) {
 		/* protected boolean canEqual(final java.lang.Object other) {
 		 *     return other instanceof Outer.Inner.MyType;
 		 * }
 		 */
 		JavacTreeMaker maker = typeNode.getTreeMaker();
 		
-		JCModifiers mods = maker.Modifiers(Flags.PROTECTED, List.<JCAnnotation>nil());
+		List<JCAnnotation> annsOnMethod = List.nil();
+		CheckerFrameworkVersion checkerFramework = getCheckerFrameworkVersion(typeNode);
+		if (checkerFramework.generatePure()) {
+			annsOnMethod = annsOnMethod.prepend(maker.Annotation(genTypeRef(typeNode, CheckerFrameworkVersion.NAME__PURE), List.<JCExpression>nil()));
+		}
+		JCModifiers mods = maker.Modifiers(Flags.PROTECTED, annsOnMethod);
 		JCExpression returnType = maker.TypeIdent(CTC_BOOLEAN);
 		Name canEqualName = typeNode.toName("canEqual");
 		JCExpression objectType = genJavaLangTypeRef(typeNode, "Object");
 		Name otherName = typeNode.toName("other");
 		long flags = JavacHandlerUtil.addFinalIfNeeded(Flags.PARAMETER, typeNode.getContext());
-		List<JCVariableDecl> params = List.of(maker.VarDef(maker.Modifiers(flags, onParam), otherName, objectType, null));
+		JCVariableDecl param = maker.VarDef(maker.Modifiers(flags, onParam), otherName, objectType, null);
+		createRelevantNullableAnnotation(typeNode, param);
+		List<JCVariableDecl> params = List.of(param);
 		
 		JCBlock body = maker.Block(0, List.<JCStatement>of(
 			maker.Return(maker.TypeTest(maker.Ident(otherName), createTypeReference(typeNode, false)))));
 		
-		return recursiveSetGeneratedBy(maker.MethodDef(mods, canEqualName, returnType, List.<JCTypeParameter>nil(), params, List.<JCExpression>nil(), body, null), source, typeNode.getContext());
+		return recursiveSetGeneratedBy(maker.MethodDef(mods, canEqualName, returnType, List.<JCTypeParameter>nil(), params, List.<JCExpression>nil(), body, null), source);
 	}
 	
 	public JCStatement generateCompareFloatOrDouble(JCExpression thisDotField, JCExpression otherDotField,
@@ -519,5 +603,31 @@ public class HandleEqualsAndHashCode extends JavacAnnotationHandler<EqualsAndHas
 	
 	public JCStatement returnBool(JavacTreeMaker maker, boolean bool) {
 		return maker.Return(maker.Literal(CTC_BOOLEAN, bool ? 1 : 0));
+	}
+	
+	private boolean jcAnnotatedTypeInit;
+	private Class<?> jcAnnotatedTypeClass = null;
+	private Field jcAnnotatedTypeUnderlyingTypeField = null;
+	
+	private JCExpression unnotate(JCExpression type) {
+		if (!isJcAnnotatedType(type)) return type;
+		if (jcAnnotatedTypeUnderlyingTypeField == null) return type;
+		try {
+			return (JCExpression) jcAnnotatedTypeUnderlyingTypeField.get(type);
+		} catch (Exception ignore) {}
+		return type;
+	}
+	
+	private boolean isJcAnnotatedType(JCExpression o) {
+		if (o == null) return false;
+		if (!jcAnnotatedTypeInit) {
+			try {
+				jcAnnotatedTypeClass = Class.forName("com.sun.tools.javac.tree.JCTree$JCAnnotatedType", false, o.getClass().getClassLoader());
+				jcAnnotatedTypeUnderlyingTypeField = jcAnnotatedTypeClass.getDeclaredField("underlyingType");
+			}
+			catch (Exception ignore) {}
+			jcAnnotatedTypeInit = true;
+		}
+		return jcAnnotatedTypeClass == o.getClass();
 	}
 }
